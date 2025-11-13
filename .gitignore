@@ -1,0 +1,74 @@
+# Dependencies
+node_modules/
+.pnp
+.pnp.js
+
+# Testing
+coverage/
+
+# Next.js
+.next/
+out/
+build/
+dist/
+
+# Production
+.vercel
+.turbo
+
+# Misc
+.DS_Store
+*.pem
+
+# Debug
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Local env files
+.env
+.env*.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Terraform
+*.tfstate
+*.tfstate.backup
+.terraform/
+
+# Backend
+target/
+!.mvn/wrapper/maven-wrapper.jar
+.apt_generated
+.classpath
+.factorypath
+.project
+.settings
+.springBeans
+.sts4-cache
+
+# Gradle
+.gradle/
+build/
+!gradle/wrapper/gradle-wrapper.jar
+!**/src/main/**/build/
+!**/src/test/**/build/
+
+# Logs
+logs/
+*.log
+
+# MCP & AI Tools
+.playwright-mcp/
+.serena/
+
+# Claude Code
+.claude/settings.local.json

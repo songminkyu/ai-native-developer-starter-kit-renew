@@ -1,0 +1,203 @@
+name: Frontend Deploy to ECS
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'frontend/**'
+      - '.github/workflows/frontend-deploy.yml'
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Deployment environment'
+        required: true
+        default: 'prod'
+        type: choice
+        options:
+          - prod
+          - staging
+
+env:
+  AWS_REGION: ap-northeast-1
+  ECR_REPOSITORY: starter-frontend
+  ECS_CLUSTER: starter-cluster
+  ECS_SERVICE: starter-frontend-service
+  ECS_TASK_DEFINITION: starter-frontend
+  CONTAINER_NAME: frontend
+
+jobs:
+  deploy:
+    name: Deploy Frontend
+    runs-on: ubuntu-latest
+
+    steps:
+      # ========================================
+      # Step 1: Checkout Repository
+      # ========================================
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Fetch full git history for Sentry
+
+      # ========================================
+      # Step 2: Setup Node.js Environment
+      # ========================================
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+
+      # ========================================
+      # Step 3: Install Dependencies & Build
+      # ========================================
+      - name: Install dependencies
+        working-directory: ./frontend
+        run: npm ci
+
+      - name: Run lint
+        working-directory: ./frontend
+        run: npm run lint
+
+      - name: Build Next.js application
+        working-directory: ./frontend
+        run: npm run build
+        env:
+          # Sentry Configuration
+          NEXT_PUBLIC_SENTRY_DSN: https://c2aa69b0331e09048b2dc4db4ebe36a8@o4510171056570368.ingest.us.sentry.io/4510233674776576
+          NEXT_PUBLIC_SENTRY_ENVIRONMENT: production
+          NEXT_PUBLIC_SENTRY_TRACES_SAMPLE_RATE: 0.1
+          NEXT_PUBLIC_SENTRY_RELEASE: ${{ github.sha }}
+          SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
+          SENTRY_ORG: dingco-ai-native-developer
+          SENTRY_PROJECT: dingco-ai-native-frontend
+
+      # ========================================
+      # Step 4: Create Sentry Release
+      # ========================================
+      - name: Create Sentry release
+        uses: getsentry/action-release@v1
+        env:
+          SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
+          SENTRY_ORG: dingco-ai-native-developer
+          SENTRY_PROJECT: dingco-ai-native-frontend
+        with:
+          environment: production
+          version: ${{ github.sha }}
+          sourcemaps: ./frontend/.next
+          ignore_missing: true
+
+      # ========================================
+      # Step 5: AWS Authentication (IAM User)
+      # ========================================
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      # ========================================
+      # Step 6: Login to Amazon ECR
+      # ========================================
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      # ========================================
+      # Step 7: Build & Push Docker Image
+      # ========================================
+      - name: Build, tag, and push image to Amazon ECR
+        id: build-image
+        working-directory: ./frontend
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: git-${{ github.sha }}
+        run: |
+          # Build Docker image
+          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
+          docker tag $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG $ECR_REGISTRY/$ECR_REPOSITORY:latest
+
+          # Push to ECR
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
+
+          # Output image URI for next steps
+          echo "image=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" >> $GITHUB_OUTPUT
+
+      # ========================================
+      # Step 8: Get or Create ECS Task Definition
+      # ========================================
+      - name: Get task definition from Terraform
+        id: get-task-def
+        run: |
+          # Terraform으로 생성된 Task Definition을 ECS에서 가져오기
+          if aws ecs describe-task-definition --task-definition ${{ env.ECS_TASK_DEFINITION }} &>/dev/null; then
+            echo "Task definition exists, downloading..."
+            aws ecs describe-task-definition \
+              --task-definition ${{ env.ECS_TASK_DEFINITION }} \
+              --query taskDefinition > task-definition.json
+          else
+            echo "Task definition not found. Please run 'terraform apply' first to create ECS infrastructure."
+            exit 1
+          fi
+
+      # ========================================
+      # Step 9: Update ECS Task Definition with New Image
+      # ========================================
+      - name: Fill in the new image ID in the Amazon ECS task definition
+        id: task-def
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        with:
+          task-definition: task-definition.json
+          container-name: ${{ env.CONTAINER_NAME }}
+          image: ${{ steps.build-image.outputs.image }}
+
+      # ========================================
+      # Step 10: Deploy to Amazon ECS
+      # ========================================
+      - name: Deploy Amazon ECS task definition
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v2
+        with:
+          task-definition: ${{ steps.task-def.outputs.task-definition }}
+          service: ${{ env.ECS_SERVICE }}
+          cluster: ${{ env.ECS_CLUSTER }}
+          wait-for-service-stability: true
+          wait-for-minutes: 10
+
+      # ========================================
+      # Step 11: Finalize Sentry Release
+      # ========================================
+      - name: Finalize Sentry release
+        uses: getsentry/action-release@v1
+        env:
+          SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
+          SENTRY_ORG: dingco-ai-native-developer
+          SENTRY_PROJECT: dingco-ai-native-frontend
+        with:
+          environment: production
+          version: ${{ github.sha }}
+          finalize: true
+          ignore_missing: true
+
+      # ========================================
+      # Step 12: Deployment Summary
+      # ========================================
+      - name: Deployment summary
+        run: |
+          echo "### 🚀 Frontend Deployment Complete" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Image:** \`${{ steps.build-image.outputs.image }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Cluster:** \`${{ env.ECS_CLUSTER }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Service:** \`${{ env.ECS_SERVICE }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Region:** \`${{ env.AWS_REGION }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Commit:** \`${{ github.sha }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Branch:** \`${{ github.ref_name }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 📊 Sentry Release" >> $GITHUB_STEP_SUMMARY
+          echo "**Release:** \`${{ github.sha }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Environment:** \`production\`" >> $GITHUB_STEP_SUMMARY
+  
