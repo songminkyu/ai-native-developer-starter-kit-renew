@@ -688,3 +688,7 @@ cd backend
 **Happy Coding! 🚀**
 
 프로덕션 레벨 프로젝트를 빠르게 시작하세요!
+
+### 참고
+* [딩코딩코](https://github.com/dingcodingco/ai-native-developer-starter-kit)
+
